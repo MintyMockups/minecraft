@@ -370,7 +370,6 @@
                 leaves: loadTex('https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@1.20.1/assets/minecraft/textures/block/oak_leaves.png'),
                 sand: loadTex('https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@1.20.1/assets/minecraft/textures/block/sand.png'),
                 snow: loadTex('https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@1.20.1/assets/minecraft/textures/block/snow.png'),
-                water: loadTex('https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@1.20.1/assets/minecraft/textures/block/water_still.png'),
                 grassTop: loadTex('https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@1.20.1/assets/minecraft/textures/block/grass_block_top.png'),
                 grassSide: loadTex('https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@1.20.1/assets/minecraft/textures/block/grass_block_side.png')
             };
@@ -382,9 +381,11 @@
             materials.sand = new THREE.MeshLambertMaterial({ map: textures.sand });
             materials.snow = new THREE.MeshLambertMaterial({ map: textures.snow });
 
-            // Leaf texture applies a standard green biome color filter to the gray-scale source asset
+            // Apply a vibrant green color filter to the grayscale leaf asset
             materials.leaves = new THREE.MeshLambertMaterial({ map: textures.leaves, color: 0x3c8527, transparent: true, opacity: 0.9 });
-            materials.water = new THREE.MeshLambertMaterial({ map: textures.water, color: 0x3f76e4, transparent: true, opacity: 0.6 });
+            
+            // Smoothed solid liquid shader eliminates visual line-grid artifacts
+            materials.water = new THREE.MeshLambertMaterial({ color: 0x1d5ca3, transparent: true, opacity: 0.6, side: THREE.DoubleSide });
 
             materials.grass = [
                 new THREE.MeshLambertMaterial({ map: textures.grassSide }),
@@ -444,7 +445,7 @@
             const key = `${x},${y},${z}`;
             if (worldBlocksData[key] !== undefined) return worldBlocksData[key];
             if (y < -64 || y > 256) return 0; 
-            if (y === -64) return 5; 
+            if (y === -64) return 10; // Bedrock is mapped to Block ID 10
 
             const biome = getBiomeAt(x, z);
             const height = getTerrainHeight(x, z, biome);
@@ -485,16 +486,37 @@
             return 0;
         }
 
+        // --- Custom Voxel Face-Culling Optimization logic ---
+
         function isBlockObscured(x, y, z) {
-            return isSolid(getBlockType(x + 1, y, z)) &&
-                   isSolid(getBlockType(x - 1, y, z)) &&
-                   isSolid(getBlockType(x, y + 1, z)) &&
-                   isSolid(getBlockType(x, y - 1, z)) &&
-                   isSolid(getBlockType(x, y, z + 1)) &&
-                   isSolid(getBlockType(x, y, z - 1));
+            const type = getBlockType(x, y, z);
+            if (type === 0) return true; // Air is always obscured
+            
+            // Evaluate surrounding neighbors sequentially
+            return isNeighborObscuring(getBlockType(x + 1, y, z), type) &&
+                   isNeighborObscuring(getBlockType(x - 1, y, z), type) &&
+                   isNeighborObscuring(getBlockType(x, y + 1, z), type) &&
+                   isNeighborObscuring(getBlockType(x, y - 1, z), type) &&
+                   isNeighborObscuring(getBlockType(x, y, z + 1), type) &&
+                   isNeighborObscuring(getBlockType(x, y, z - 1), type);
         }
 
-        // Leaves (ID 6) and Water (ID 9) are non-solid for movement mechanics
+        function isNeighborObscuring(neighborType, blockType) {
+            if (neighborType === 0) return false; // Air does not obscure faces
+            
+            // Adjacent water blocks block internal face drawing
+            if (blockType === 9 && neighborType === 9) return true;
+            
+            // Adjacent leaves block internal face drawing
+            if (blockType === 6 && neighborType === 6) return true;
+            
+            // Solid blocks obscure everything else
+            if (isSolid(neighborType)) return true;
+            
+            return false;
+        }
+
+        // Leaves (6) and Water (9) are non-solid blocks
         function isSolid(type) {
             return type !== 0 && type !== 6 && type !== 9; 
         }
@@ -528,13 +550,12 @@
             else if (type === 7) activeMaterial = materials.sand; 
             else if (type === 8) activeMaterial = materials.snow; 
             else if (type === 9) activeMaterial = materials.water; 
-
-            if (y === -64) activeMaterial = materials.bedrock;
+            else if (type === 10) activeMaterial = materials.bedrock;
 
             const mesh = new THREE.Mesh(blockGeometry, activeMaterial);
             mesh.position.set(x, y, z);
             mesh.gridPos = { x, y, z };
-            mesh.blockType = y === -64 ? 5 : type;
+            mesh.blockType = type;
 
             scene.add(mesh);
             activeBlockMeshes[key] = mesh;
@@ -819,7 +840,6 @@
                     for (let z = pz - 1; z <= pz + 1; z++) {
                         const key = `${x},${y},${z}`;
                         const blockMesh = activeBlockMeshes[key];
-                        // Collision calculations are filtered to ignore non-solid blocks
                         if (blockMesh && isSolid(blockMesh.blockType)) {
                             blockBox.setFromObject(blockMesh);
                             if (playerBox.intersectsBox(blockBox)) {
@@ -939,27 +959,28 @@
             document.getElementById('coord-cz').innerText = Math.floor(camera.position.z / chunkSize);
         }
 
-        // Dynamic downward column lookup determines safe top-surface coordinates to spawn
         function getSpawnY(x, z) {
-            // Scans downwards from a safe top bound to identify first non-air block
+            // Evaluates chunk blocks down to find highest support plane including wood logs and foliage
             for (let y = 180; y >= -64; y--) {
                 const type = getBlockType(x, y, z);
                 if (type !== 0) {
-                    return y + 2.5; // Positions camera safely above top leaf structures
+                    return y + 2.5; 
                 }
             }
-            return 72; // Standard fallback
+            return 72; 
         }
 
         function startGame() {
             if (!scene) initEngine();
             PerlinNoise.init();
 
-            // Locate a clear, supported, top block coordinate to initialize the camera
+            // 1. Build initial surrounding chunks so getSpawnY queries actual populated tree elements
+            updateChunks();
+
+            // 2. Identify the absolute highest block layer to safely set spawn coordinate
             const spawnY = getSpawnY(0, 0);
 
             camera.position.set(0, spawnY, 0);
-            updateChunks();
             velocity.set(0, 0, 0);
             horizontalVelocity.set(0, 0, 0);
             isCrouching = false;
